@@ -108,9 +108,7 @@ defmodule Benchee.Benchmark.Runner do
     do_benchmark(updated_scenario, new_context)
   end
 
-  defp current_time do
-    :erlang.system_time :micro_seconds
-  end
+  defp current_time, do: :erlang.system_time :micro_seconds
 
   # If a function executes way too fast measurements are too unreliable and
   # with too high variance. Therefore determine an n how often it should be
@@ -121,7 +119,7 @@ defmodule Benchee.Benchmark.Runner do
                            num_iterations: num_iterations,
                            printer: printer
                          }, fast_warning) do
-    run_time = measure_iteration(scenario, scenario_context)
+    {run_time, _} = measure_iteration(scenario, scenario_context)
     if run_time >= @minimum_execution_time do
       {num_iterations, run_time / num_iterations}
     else
@@ -140,13 +138,20 @@ defmodule Benchee.Benchmark.Runner do
     # restore correct order - important for graphing
     %Scenario{scenario | run_times: run_times |> List.flatten |> Enum.sort}
   end
-  defp do_benchmark(scenario = %Scenario{run_times: run_times},
+  defp do_benchmark(scenario = %Scenario{run_times: run_times,
+                                         memory_usages: memory_usages},
                     scenario_context) do
-    new_run_times = Parallel.map(0..scenario_context.config.parallel, fn _ ->
-      iteration_time(scenario, scenario_context)
-    end)
+    scenario_results =
+      Parallel.map(0..scenario_context.config.parallel, fn _ ->
+        iteration_time(scenario, scenario_context)
+      end)
+    new_run_times =
+      Enum.map(scenario_results, fn {run_times, _} -> run_times end)
+    new_memory_usages =
+      Enum.map(scenario_results, fn {_, memory_usages} -> memory_usages end)
     updated_scenario =
-      %Scenario{scenario | run_times: [new_run_times | run_times]}
+      %Scenario{scenario | run_times: new_run_times ++ run_times,
+                           memory_usages: new_memory_usages ++ memory_usages}
     updated_context =
       %ScenarioContext{scenario_context | current_time: current_time()}
     do_benchmark(updated_scenario, updated_context)
@@ -155,7 +160,8 @@ defmodule Benchee.Benchmark.Runner do
   defp iteration_time(scenario, scenario_context = %ScenarioContext{
                                   num_iterations: num_iterations
                                 }) do
-    measure_iteration(scenario, scenario_context) / num_iterations
+    {microseconds, memory_usage} = measure_iteration(scenario, scenario_context)
+    {microseconds / num_iterations, memory_usage / num_iterations}
   end
 
   defp measure_iteration(scenario = %Scenario{function: function},
@@ -163,9 +169,11 @@ defmodule Benchee.Benchmark.Runner do
                            num_iterations: 1
                          }) do
     new_input = run_before_each(scenario, scenario_context)
+    {:memory, memory_usage_before} = :erlang.process_info(self(), :memory)
     {microseconds, return_value} = :timer.tc main_function(function, new_input)
+    {:memory, memory_usage_after} = :erlang.process_info(self(), :memory)
     run_after_each(return_value, scenario, scenario_context)
-    microseconds
+    {microseconds, memory_usage_after - memory_usage_before}
   end
   defp measure_iteration(scenario, scenario_context = %ScenarioContext{
                           num_iterations: iterations,
@@ -174,8 +182,10 @@ defmodule Benchee.Benchmark.Runner do
     # of hooks is already included in the function, for reference/reasoning see
     # `build_benchmarking_function/2`
     function = build_benchmarking_function(scenario, scenario_context)
+    {:memory, memory_usage_before} = :erlang.process_info(self(), :memory)
     {microseconds, _return_value} = :timer.tc function
-    microseconds
+    {:memory, memory_usage_after} = :erlang.process_info(self(), :memory)
+    {microseconds, memory_usage_after - memory_usage_before}
   end
 
   @no_input Benchmark.no_input()
